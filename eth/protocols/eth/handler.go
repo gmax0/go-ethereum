@@ -100,6 +100,7 @@ type TxPool interface {
 	Get(hash common.Hash) *types.Transaction
 }
 
+// TODO: Disconnect ETH subprotocol here
 // MakeProtocols constructs the P2P protocol definitions for `eth`.
 func MakeProtocols(backend Backend, network uint64, dnsdisc enode.Iterator) []p2p.Protocol {
 	protocols := make([]p2p.Protocol, len(ProtocolVersions))

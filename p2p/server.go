@@ -19,6 +19,7 @@ package p2p
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
 	"errors"
@@ -39,6 +40,8 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/ethereum/go-ethereum/p2p/nat"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
+
+	"github.com/go-redis/redis/v8"
 )
 
 const (
@@ -64,6 +67,7 @@ const (
 	frameWriteTimeout = 20 * time.Second
 )
 
+var ctx = context.Background()
 var errServerStopped = errors.New("server stopped")
 
 // Config holds Server options.
@@ -184,6 +188,8 @@ type Server struct {
 	DiscV5    *discover.UDPv5
 	discmix   *enode.FairMix
 	dialsched *dialScheduler
+
+	rdb		*redis.Client
 
 	// Channels into the run loop.
 	quit                    chan struct{}
@@ -470,6 +476,19 @@ func (srv *Server) Start() (err error) {
 	srv.peerOp = make(chan peerOpFunc)
 	srv.peerOpDone = make(chan struct{})
 
+	// Redis Setup
+	srv.rdb = redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+		Password: "",
+		DB: 0, // Use IND 0 for now
+	})
+	log.Info("Initialized Redis Connection")
+
+	err = srv.rdb.Set(ctx, "TESTKEY", "TESTKEYVAL", 0).Err()
+	if err != nil {
+		log.Error("REDIS ERROR: ", err)
+	}
+
 	if err := srv.setupLocalNode(); err != nil {
 		return err
 	}
@@ -497,6 +516,7 @@ func (srv *Server) setupLocalNode() error {
 	}
 	sort.Sort(capsByNameAndVersion(srv.ourHandshake.Caps))
 
+	// TODO: Setup Redis Client here
 	// Create the local node.
 	db, err := enode.OpenDB(srv.Config.NodeDatabase)
 	if err != nil {
@@ -614,7 +634,10 @@ func (srv *Server) setupDiscovery() error {
 	return nil
 }
 
+// TODO: Hard-code max dial values here
 func (srv *Server) setupDialScheduler() {
+	log.Info("SETTING UP DIAL SCHEDULER")
+
 	config := dialConfig{
 		self:           srv.localnode.ID(),
 		maxDialPeers:   srv.maxDialedConns(),
@@ -624,6 +647,7 @@ func (srv *Server) setupDialScheduler() {
 		dialer:         srv.Dialer,
 		clock:          srv.clock,
 	}
+
 	if srv.ntab != nil {
 		config.resolver = srv.ntab
 	}
@@ -636,10 +660,13 @@ func (srv *Server) setupDialScheduler() {
 	}
 }
 
+// Do not allow inbound connections
 func (srv *Server) maxInboundConns() int {
-	return srv.MaxPeers - srv.maxDialedConns()
+	return 0
+	//return srv.MaxPeers - srv.maxDialedConns()
 }
 
+// TODO: Modify value
 func (srv *Server) maxDialedConns() (limit int) {
 	if srv.NoDial || srv.MaxPeers == 0 {
 		return 0
@@ -706,6 +733,7 @@ func (srv *Server) run() {
 	// Put trusted nodes into a map to speed up checks.
 	// Trusted peers are loaded on startup or added via AddTrustedPeer RPC.
 	for _, n := range srv.TrustedNodes {
+		log.Info("Adding trusted node: {}", n.ID())
 		trusted[n.ID()] = true
 	}
 
@@ -761,6 +789,7 @@ running:
 				srv.dialsched.peerAdded(c)
 				if p.Inbound() {
 					inboundCount++
+					log.Debug("Inbound p2p peer was added", "inboundcount", inboundCount)
 				}
 			}
 			c.cont <- err
@@ -928,11 +957,13 @@ func (srv *Server) SetupConn(fd net.Conn, flags connFlag, dialDest *enode.Node) 
 
 	err := srv.setupConn(c, flags, dialDest)
 	if err != nil {
+		// TODO: Write to database here
 		c.close(err)
 	}
 	return err
 }
 
+// RLPx Checks
 func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *enode.Node) error {
 	// Prevent leftover pending conns from entering the handshake.
 	srv.lock.Lock()

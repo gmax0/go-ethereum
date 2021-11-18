@@ -80,7 +80,7 @@ func Parse(validSchemes enr.IdentityScheme, input string) (*Node, error) {
 }
 
 // ID returns the node identifier.
-func (n *Node) ID() ID {
+func (n *Node)  ID() ID {
 	return n.id
 }
 

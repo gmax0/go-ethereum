@@ -401,7 +401,12 @@ func (p *Peer) startProtocols(writeStart <-chan struct{}, writeErr chan<- error)
 		if p.events != nil {
 			rw = newMsgEventer(rw, p.events, p.ID(), proto.Name, p.Info().Network.RemoteAddress, p.Info().Network.LocalAddress)
 		}
-		p.log.Trace(fmt.Sprintf("Starting protocol %s/%d", proto.Name, proto.Version))
+		//p.log.Trace(fmt.Sprintf("Starting protocol %s/%d", proto.Name, proto.Version))
+
+		p.log.Trace(fmt.Sprintf("Protocols disabled %s/%d", proto.Name, proto.Version))
+
+		//TODO: Disconnect this.
+		/*
 		go func() {
 			defer p.wg.Done()
 			err := proto.Run(p, rw)
@@ -413,6 +418,8 @@ func (p *Peer) startProtocols(writeStart <-chan struct{}, writeErr chan<- error)
 			}
 			p.protoErr <- err
 		}()
+
+		 */
 	}
 }
 
