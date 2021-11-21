@@ -189,7 +189,8 @@ type Server struct {
 	discmix   *enode.FairMix
 	dialsched *dialScheduler
 
-	rdb		*redis.Client
+	rdb_err     *redis.Client
+	rdb_success *redis.Client
 
 	// Channels into the run loop.
 	quit                    chan struct{}
@@ -477,14 +478,25 @@ func (srv *Server) Start() (err error) {
 	srv.peerOpDone = make(chan struct{})
 
 	// Redis Setup
-	srv.rdb = redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
+	srv.rdb_err = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
 		Password: "",
-		DB: 0, // Use IND 0 for now
+		DB:       0, // Use IND 0 for failures
 	})
+	srv.rdb_success = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       1, // Use IND 1 for successes
+	})
+
 	log.Info("Initialized Redis Connection")
 
-	err = srv.rdb.Set(ctx, "TESTKEY", "TESTKEYVAL", 0).Err()
+	err = srv.rdb_err.Set(ctx, "TESTKEY", "TESTKEYVAL", 0).Err()
+	if err != nil {
+		log.Error("REDIS ERROR: ", err)
+	}
+
+	err = srv.rdb_success.Set(ctx, "TESTKEY", "TESTKEYVAL", 0).Err()
 	if err != nil {
 		log.Error("REDIS ERROR: ", err)
 	}
@@ -639,9 +651,11 @@ func (srv *Server) setupDialScheduler() {
 	log.Info("SETTING UP DIAL SCHEDULER")
 
 	config := dialConfig{
-		self:           srv.localnode.ID(),
-		maxDialPeers:   srv.maxDialedConns(),
-		maxActiveDials: srv.MaxPendingPeers,
+		self: srv.localnode.ID(),
+		//maxDialPeers:   srv.maxDialedConns(),
+		//maxActiveDials: srv.MaxPendingPeers,
+		maxDialPeers:   10000,
+		maxActiveDials: 10000,
 		log:            srv.Logger,
 		netRestrict:    srv.NetRestrict,
 		dialer:         srv.Dialer,
@@ -679,6 +693,7 @@ func (srv *Server) maxDialedConns() (limit int) {
 	if limit == 0 {
 		limit = 1
 	}
+	log.Info("Max dialed ratio", limit)
 	return limit
 }
 
@@ -714,6 +729,29 @@ func (srv *Server) doPeerOp(fn peerOpFunc) {
 	case srv.peerOp <- fn:
 		<-srv.peerOpDone
 	case <-srv.quit:
+	}
+}
+
+// Key=IP:Port, Value=Timestamp|Error
+func (srv *Server) logErrToRedis(c *conn, err error) {
+	log.Trace("Writing error to Redis...")
+	redisErr := srv.rdb_err.RPush(ctx,
+		c.fd.RemoteAddr().String(),
+		fmt.Sprintf("%s|%s",
+			time.Now().Format(time.RFC3339Nano), err)).Err()
+	if redisErr != nil {
+		log.Error("Error writing to Redis.", "err", redisErr)
+	}
+}
+
+// Key=IP:Port, Value=Timestamp|NodeId|Name|SupportedProtocols
+func (srv *Server) logSuccessToRedis(p *Peer) {
+	redisErr := srv.rdb_success.RPush(ctx,
+		p.rw.fd.RemoteAddr().String(),
+		fmt.Sprintf("%s|%s|%s|%s",
+			time.Now().Format(time.RFC3339Nano), p.ID(), p.Name(), p.running)).Err()
+	if redisErr != nil {
+		log.Error("Error writing to Redis.", "err", redisErr)
 	}
 }
 
@@ -786,10 +824,21 @@ running:
 				p := srv.launchPeer(c)
 				peers[c.node.ID()] = p
 				srv.log.Debug("Adding p2p peer", "peercount", len(peers), "id", p.ID(), "conn", c.flags, "addr", p.RemoteAddr(), "name", p.Name())
+				srv.log.Debug("Peer Proto", "proto", p.running)
 				srv.dialsched.peerAdded(c)
 				if p.Inbound() {
 					inboundCount++
 					log.Debug("Inbound p2p peer was added", "inboundcount", inboundCount)
+				}
+
+				srv.logSuccessToRedis(p)
+
+				// Re-use disconnect logic here
+				srv.log.Info("Removing p2p peer...info extracted")
+				delete(peers, p.ID())
+				srv.dialsched.peerRemoved(p.rw)
+				if p.Inbound() {
+					inboundCount--
 				}
 			}
 			c.cont <- err
@@ -956,14 +1005,26 @@ func (srv *Server) SetupConn(fd net.Conn, flags connFlag, dialDest *enode.Node) 
 	}
 
 	err := srv.setupConn(c, flags, dialDest)
+
+	if dialDest != nil && dialDest.IP() != nil {
+		log.Info("dialDest: ", "IP", dialDest.IP().String())
+	}
+
+	// If RLPx handshake fails
 	if err != nil {
-		// TODO: Write to database here
+
 		c.close(err)
 	}
+	//} else {
+	//	err = srv.rdb.RPush(ctx, dialDest.IP(), "").Err()
+	//	if err != nil {
+	//		log.Error("REDIS ERROR: ", err)
+	//	}
+	//}
 	return err
 }
 
-// RLPx Checks
+// RLPx Checks, Log to Redis HERE
 func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *enode.Node) error {
 	// Prevent leftover pending conns from entering the handshake.
 	srv.lock.Lock()
@@ -988,6 +1049,9 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *enode.Node) erro
 	remotePubkey, err := c.doEncHandshake(srv.PrivateKey)
 	if err != nil {
 		srv.log.Trace("Failed RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
+
+		srv.logErrToRedis(c, err)
+
 		return err
 	}
 	if dialDest != nil {
@@ -999,6 +1063,9 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *enode.Node) erro
 	err = srv.checkpoint(c, srv.checkpointPostHandshake)
 	if err != nil {
 		clog.Trace("Rejected peer", "err", err)
+
+		srv.logErrToRedis(c, err)
+
 		return err
 	}
 
@@ -1006,16 +1073,25 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *enode.Node) erro
 	phs, err := c.doProtoHandshake(srv.ourHandshake)
 	if err != nil {
 		clog.Trace("Failed p2p handshake", "err", err)
+
+		srv.logErrToRedis(c, err)
+
 		return err
 	}
 	if id := c.node.ID(); !bytes.Equal(crypto.Keccak256(phs.ID), id[:]) {
 		clog.Trace("Wrong devp2p handshake identity", "phsid", hex.EncodeToString(phs.ID))
+
+		srv.logErrToRedis(c, err)
+
 		return DiscUnexpectedIdentity
 	}
 	c.caps, c.name = phs.Caps, phs.Name
 	err = srv.checkpoint(c, srv.checkpointAddPeer)
 	if err != nil {
 		clog.Trace("Rejected peer", "err", err)
+
+		srv.logErrToRedis(c, err)
+
 		return err
 	}
 
