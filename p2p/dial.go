@@ -232,7 +232,7 @@ loop:
 		// Launch new dials if slots are available.
 		slots := d.freeDialSlots()
 		slots -= d.startStaticDials(slots)
-		log.Info("Dial Slots", "slots", slots)
+		log.Trace("Dial Slots", "slots", slots)
 		if slots > 0 {
 			nodesCh = d.nodesIn
 		} else {

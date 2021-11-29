@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -746,6 +747,16 @@ func (srv *Server) logErrToRedis(c *conn, err error) {
 
 // Key=IP:Port, Value=Timestamp|NodeId|Name|SupportedProtocols
 func (srv *Server) logSuccessToRedis(p *Peer) {
+	prevSaved := srv.rdb_success.Get(ctx, p.rw.fd.RemoteAddr().String())
+	if prevSaved != nil {
+		payload := map[string]string{"peer": p.rw.fd.RemoteAddr().String()}
+		jsonPayload, _ := json.Marshal(payload)
+		pubErr := srv.rdb_success.Publish(ctx, "discovered", string(jsonPayload))
+		if pubErr != nil {
+			log.Error("Error publishing to Redis.", "err", pubErr)
+		}
+	}
+
 	redisErr := srv.rdb_success.RPush(ctx,
 		p.rw.fd.RemoteAddr().String(),
 		fmt.Sprintf("%s|%s|%s|%s",
